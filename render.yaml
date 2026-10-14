@@ -16,7 +16,8 @@ services:
     region: singapore        # 日本から近い。oregon / frankfurt / ohio / virginia も可
     branch: main
     rootDir: .
-    buildCommand: npm install
+    # devDependencies（railway SDK 等）は本番に不要なので --omit=dev
+    buildCommand: npm ci --omit=dev || npm install --omit=dev
     startCommand: node server.js
     healthCheckPath: /healthz
     # 無料プランは 15 分無通信でスリープする。有料なら以下を解除すると常時稼働。
@@ -25,8 +26,9 @@ services:
 
     envVars:
       # Node のバージョンを固定（package.json の engines と合わせる）
+      # Node 20 は 2026-04-30 に EOL。Node 22 LTS (Jod) を使う。
       - key: NODE_VERSION
-        value: 20.18.1
+        value: 22.23.3
       - key: NODE_ENV
         value: production
       - key: LOG_LEVEL

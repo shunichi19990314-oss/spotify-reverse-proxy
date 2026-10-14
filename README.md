@@ -1,10 +1,18 @@
 # spotify-reverse-proxy
 
-**Render にそのままデプロイできる、Spotify Web Player (`open.spotify.com`) を自ドメイン経由で表示するリバースプロキシ**です。
+**Render / Railway にそのままデプロイできる、Spotify Web Player (`open.spotify.com`) を自ドメイン経由で表示するリバースプロキシ**です。
 
 HTML / CSS / JS / JSON の本文中にある Spotify 系絶対 URL をプロキシ自身のパスへ書き換え、さらにブラウザ側でも `fetch` / `XHR` / `WebSocket` / 要素属性をランタイムパッチするため、実行時に組み立てられる URL（アクセスポイントや dealer の接続先）も取りこぼしません。
 
-依存パッケージは **`undici` と `ws` の 2 つだけ**。フレームワーク不使用の素の Node.js 20 実装です。
+依存パッケージは本番 **`undici` と `ws` の 2 つだけ**。フレームワーク不使用の素の Node.js 実装です。
+
+| プラットフォーム | 設定ファイル | 状態 |
+|---|---|---|
+| **Render** | `render.yaml`（Blueprint） | ✅ 同梱・すぐデプロイ可 |
+| **Railway** | `Dockerfile` 自動検出 / `.railway/railway.ts`（IaC） | ✅ 同梱・すぐデプロイ可 |
+| **その他 Docker 対応 PaaS** | `Dockerfile` | ✅ Fly.io / Cloud Run / ECS など |
+
+> **Node のバージョン**: Node 20 は **2026-04-30 に EOL** を迎えたため、デプロイ先は **Node 22 LTS (Jod)** に固定してあります（`Dockerfile` / `.node-version` / `render.yaml`）。コード自体は Node 20.11 以上で動作し、テストも Node 20 で通しています。
 
 ---
 
@@ -22,6 +30,8 @@ HTML / CSS / JS / JSON の本文中にある Spotify 系絶対 URL をプロキ�
 | **ログイン（accounts.spotify.com）** | ❌ 高確率で失敗 | Spotify 側が `redirect_uri` とオリジンを厳格に検査する |
 | **楽曲の再生（Widevine DRM）** | ❌ 高確率で失敗 | ライセンスサーバーがオリジンを検査する。`encrypted-media` は許可してあるが origin 検証は回避不能 |
 | Spotify Connect / デスクトップ連携 | ❌ 不可 | `spotilocal.com` はローカルマシン宛のためプロキシ経由では届かない |
+
+> **PaaS による差**: Render の無料プランは 15 分でスリープしますが、Railway にはスリープがありません（代わりに恒久無料枠が無く、$5 クレジットのトライアル後は Hobby $5/月）。常時稼働させたいなら Railway、無料で試すだけなら Render が向いています。
 
 > **現実的な使いどころ**
 > - 自ドメイン配下で Web Player の UI を表示・調査する（フロントエンド研究、UI 解析、スクレイピングの土台）
@@ -134,9 +144,11 @@ open "http://localhost:10000/__spx/demo?token=secret"
 
 ---
 
-## 4. Render にデプロイ
+## 4. デプロイ
 
-### 方法 A: Blueprint（おすすめ・`render.yaml` 同梱）
+### 4-A. Render
+
+#### Blueprint（おすすめ・`render.yaml` 同梱）
 
 1. このディレクトリを GitHub / GitLab リポジトリに push する
    ```bash
@@ -146,32 +158,159 @@ open "http://localhost:10000/__spx/demo?token=secret"
    ```
 2. Render ダッシュボード → **New +** → **Blueprint** → リポジトリを選択
 3. `render.yaml` が自動認識され、設定済みの Web Service が作成される
-4. 環境変数 `ACCESS_TOKEN` に **Generate** で生成された値が入る（`Sync` 済み）
-5. デプロイ完了後、`https://<your-app>.onrender.com/` を開く
+   - Runtime: **Node**（`Dockerfile` は使わない）
+   - Build: `npm ci --omit=dev`
+   - Health Check: `/healthz`
+   - `ACCESS_TOKEN` は **Generate** で自動生成される
+4. デプロイ完了後、`https://<your-app>.onrender.com/` を開く
 
-### 方法 B: 手動
+#### 手動で作る場合
 
 | 項目 | 値 |
 |---|---|
 | Environment | **Node** |
 | Region | Singapore（日本から最短） |
 | Plan | Free |
-| Build Command | `npm install` |
+| Build Command | `npm ci --omit=dev` |
 | Start Command | `node server.js` |
 | Health Check Path | `/healthz` |
-| Env | `NODE_VERSION=20.18.1` / `ACCESS_TOKEN=<任意の長い文字列>` |
+| Env | `NODE_VERSION=22.23.3` / `ACCESS_TOKEN=<長い乱数>` |
+
+> **無料プランは 15 分無通信でスリープ**し、再開に 30〜60 秒かかります。常時稼働させるなら Starter プラン以上が必要です。
+
+---
+
+### 4-B. Railway
+
+> ⚠️ **`railway.json` / `railway.toml`（Config as Code）は使っていません。**
+> 公式に**非推奨**で、**新規サービスでは利用できず**、既存サービスも **2026-12-01** に読まれなくなります。
+> 後継の **Infrastructure as Code**（`.railway/railway.ts`）を同梱してあります。
+
+#### 方法 1: ダッシュボード（一番簡単・設定ファイル不要）
+
+リポジトリ直下に `Dockerfile` があるので、**Railway は自動的に Dockerfile ビルダーを使います**（公式仕様）。
+
+1. [railway.com](https://railway.com) → **New Project** → **Deploy from GitHub Repo**
+2. リポジトリを選択 → 自動でビルドが走る
+3. サービスの **Settings → Networking → Generate Domain** で公開 URL を発行
+4. **Variables** タブで以下を設定
+   ```
+   ACCESS_TOKEN=<openssl rand -hex 32 の出力>
+   ```
+5. **Settings → Deploy → Healthcheck Path** に `/healthz` を設定
+6. `https://<app>.up.railway.app/` を開く
+
+`PORT` は Railway が自動注入するので**設定しない**でください（本アプリは `process.env.PORT` を読みます）。
+
+#### 方法 2: Railway CLI（`railway up`）
+
+```bash
+npm install -g @railway/cli
+railway login
+
+cd spotify-reverse-proxy
+railway init                              # プロジェクト作成（名前: spotify-reverse-proxy）
+railway variables --set "ACCESS_TOKEN=$(openssl rand -hex 32)"
+railway variables --set "LOG_LEVEL=info"
+railway up                                # ローカルのコードをそのままビルド＆デプロイ
+railway domain                            # 公開ドメインを発行
+railway logs                              # ログを tail
+```
+
+#### 方法 3: Infrastructure as Code（`.railway/railway.ts`）
+
+環境変数・ヘルスチェック・レプリカ数まで含めてコードで再現可能にする方法です。
+
+```bash
+npm install                     # devDependencies の railway SDK が入る
+npm install -g @railway/cli     # 初回のみ
+
+railway login
+railway link                    # プロジェクト / 環境をこのディレクトリに紐づけ
+
+npm run railway:plan            # 差分プレビュー（読み取り専用・安全）
+npm run railway:apply           # 確認しながら適用
+npm run railway:pull            # 逆に Railway 側の現状を railway.ts に取り込む
+```
+
+`.railway/railway.ts` の要点:
+
+```ts
+const proxy = service("spotify-reverse-proxy", {
+  source: github("<owner>/<repo>", { branch: "main" }),
+  start: "node server.js",
+  healthcheck: "/healthz",        // 認証不要なので ACCESS_TOKEN 設定後も 200
+  healthcheckTimeout: 120,
+  replicas: 1,
+  env: {
+    NODE_ENV: "production",
+    LOG_LEVEL: prod ? "info" : "debug",   // 環境ごとに分岐
+    CACHE_MAX_BYTES: "52428800",          // 0.5GB RAM プラン向けに 50MB
+    ACCESS_TOKEN: preserve(),             // ★ 値はソースに書かず Railway 側を維持
+    // ...
+  },
+});
+```
+
+**`ACCESS_TOKEN` は `preserve()`** にしてあるので、シークレットが Git に入りません。初回は以下で設定してください。
+
+```bash
+railway variables --set "ACCESS_TOKEN=$(openssl rand -hex 32)"
+```
+
+> `.railway/railway.ts` の `source: github(...)` は **あなたのリポジトリに書き換えて**ください。
+> 検証用に `test/railway-iac.test.js` でグラフ生成をチェックしています（`npm test` に含まれます）。
+
+#### Railway の料金（2026 年時点）
+
+- 恒久的な無料枠は**ありません**。**30 日間のトライアルに $5 クレジット**が付与され、以降は **Hobby $5/月**（$5 の利用クレジット込み）
+- 下位プランは **1 vCPU / 0.5GB RAM / サービス**。本アプリは実測 RSS 100〜130MB なので余裕があります
+- Render と違い**アイドルスリープが無い**ので、常時稼働させたいなら Railway の方が素直です
+- 詳細は [railway.com/pricing](https://railway.com/pricing)
+
+#### Railway 特有の注意
+
+| 項目 | 内容 |
+|---|---|
+| `PORT` | 自動注入。**`.env` や Variables で固定しないこと** |
+| 待ち受け | `0.0.0.0` 必須（本アプリの既定値） |
+| 公開ドメイン | 自動では付かない。**Generate Domain** か `railway domain` が必要 |
+| ヘルスチェック | Dockerfile の `HEALTHCHECK` は無視される。`healthcheckPath` / `healthcheck: "/healthz"` で指定 |
+| ビルダー | `Dockerfile` があれば常にそれが使われる。Railpack に変えたい場合はダッシュボードの Service Settings → Build で切替（`.node-version` = 22 が参照されます） |
+| 起動ログ | `RAILWAY_PUBLIC_DOMAIN` を検出してアクセス先 URL を自動出力します |
+
+---
+
+### 4-C. Docker（Fly.io / Cloud Run など）
+
+```bash
+docker build -t spotify-reverse-proxy .
+docker run --rm -p 10000:10000 \
+  -e ACCESS_TOKEN=$(openssl rand -hex 32) \
+  spotify-reverse-proxy
+# -> http://localhost:10000/
+```
+
+イメージは `node:22-alpine` ベースで、`server.js` / `lib/` / `assets/` / 本番依存のみを含みます（devDependencies と test は `.dockerignore` で除外）。非 root（`USER node`）で起動します。
+
+---
 
 ### デプロイ後の確認
 
 ```bash
-BASE=https://<your-app>.onrender.com
+BASE=https://<your-app>.onrender.com        # または https://<app>.up.railway.app
+TOKEN=<ACCESS_TOKEN>
 
 curl -s $BASE/healthz                                        # ok（認証不要）
-curl -s "$BASE/__spx/info?token=$ACCESS_TOKEN" | jq .routes  # ルート一覧
-curl -sI "$BASE/?token=$ACCESS_TOKEN" | grep -i '^set-cookie'  # 認証 Cookie が付く
+curl -s "$BASE/__spx/info?token=$TOKEN" | jq .routes         # ルート一覧
+curl -s "$BASE/__spx/stats?token=$TOKEN" | jq .cache         # キャッシュ統計
+curl -sI "$BASE/?token=$TOKEN" | grep -i '^set-cookie'       # 認証 Cookie が付く
+
+# 22 項目のライブ検証
+SPX_BASE=$BASE SPX_TOKEN=$TOKEN npm run verify
 ```
 
-> **無料プランは 15 分無通信でスリープ**し、再開に 30〜60 秒かかります。常時稼働させるなら Starter プラン以上が必要です。
+ブラウザで `$BASE/__spx/demo?token=$TOKEN` を開くと、iframe 表示デモページがそのまま使えます。
 
 ---
 
@@ -327,7 +466,8 @@ Spotify のハッシュ付き静的アセットは `public, max-age=31536000, im
 
 ### 502「上流サーバーに接続できませんでした」
 
-- **Render のアウトバウンド IP が Akamai にブロックされている**可能性があります。`region` を変えて試してください（`oregon` / `frankfurt` / `ohio`）
+- **PaaS のアウトバウンド IP が Akamai にブロックされている**可能性があります。Render なら `region` を変える（`oregon` / `frankfurt` / `ohio`）、Railway ならリージョンを変えて試してください
+  - 実測では Render / Railway どちらの IP 帯からも `open.spotify.com` に到達できていますが、データセンター IP 全般に対する Spotify 側の方針は変わり得ます
 - `USER_AGENT` に実在のブラウザ UA を固定すると通ることがあります
 - 上流の障害・レート制限の可能性もあるので、直接 `https://open.spotify.com/` に到達できるかも確認
 
@@ -375,11 +515,18 @@ spotify-reverse-proxy/
 │   ├── rewrite.test.js     # 書き換えロジック（サブドメイン偽装防止を含む）
 │   ├── hosts.test.js       # ホスト許可 / パス分解
 │   ├── headers.test.js     # ヘッダ衛生 / Set-Cookie / Location
-│   └── e2e.test.js         # モック上流 + 実サーバ起動の結合テスト
+│   ├── e2e.test.js         # モック上流 + 実サーバ起動の結合テスト
+│   └── railway-iac.test.js # .railway/railway.ts のグラフ検証 / Node バージョン検査
 ├── scripts/
 │   └── live-smoke.mjs      # 実 Spotify に対するライブ検証（npm run verify）
+├── .railway/
+│   ├── railway.ts          # Railway Infrastructure as Code（IaC）
+│   └── README.md           # IaC の使い方
 ├── render.yaml             # Render Blueprint
-├── Dockerfile              # 任意（Docker ランタイムを使う場合）
+├── Dockerfile              # Railway / Fly.io / Cloud Run 用（Railway は自動検出）
+├── .dockerignore
+├── .node-version           # 22（Railpack / Nixpacks / fnm / mise 用）
+├── .nvmrc                  # 22
 ├── .env.example            # 環境変数サンプル
 └── package.json
 ```
@@ -388,12 +535,13 @@ spotify-reverse-proxy/
 
 ```bash
 npm test
-# tests 65 / pass 65 / fail 0
+# tests 71 / pass 71 / fail 0
 
-npm run verify   # 実 Spotify を相手とした 23 項目のライブ検証（要ネットワーク）
-# 23 PASS / 0 FAIL
+npm run verify   # 実 Spotify を相手としたライブ検証（要ネットワーク）
+# 22 PASS / 0 FAIL
 ```
 
+- **Railway IaC**: `.railway/railway.ts` を実際に `railway/iac` SDK で評価し、service / healthcheck / startCommand / `preserve()` を検証。あわせて「非推奨の `railway.json` を置いていないこと」「Dockerfile と `.node-version` と `render.yaml` が EOL の Node 20 を指していないこと」も検査する
 - **ユニット**: 書き換え（生 / エスケープ / Unicode / CSS / srcset / 入れ子スキーム / サブドメイン偽装）、ホスト許可判定、ヘッダ衛生、Set-Cookie 書き換え
 - **E2E**: モック上流サーバを立て、実サーバを子プロセスで起動。HTML 書き換え・CSP 除去・ランタイムパッチ注入位置・JS バンドルのエスケープ形・Location・Set-Cookie・バイナリ素通し・上限超過ストリーム・gzip・POST ボディ・**WebSocket 双方向中継**・403 拒否・キャッシュ HIT/MISS・`ACCESS_TOKEN` 認証を通す
 - **性能スモーク**: 2.4MB のテキスト書き換えが 15 秒以内

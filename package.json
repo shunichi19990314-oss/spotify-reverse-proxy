@@ -3,7 +3,7 @@
   "version": "1.0.0",
   "private": true,
   "type": "module",
-  "description": "Render-deployable reverse proxy that serves the Spotify Web Player (open.spotify.com) from your own origin, with HTML/CSS/JS URL rewriting.",
+  "description": "Render / Railway 対応のリバースプロキシ。Spotify Web Player (open.spotify.com) を自オリジン配下で表示する（HTML/CSS/JS の URL 書き換え + ランタイムパッチ）。",
   "main": "server.js",
   "engines": {
     "node": ">=20.11.0"
@@ -12,11 +12,17 @@
     "start": "node server.js",
     "dev": "node --watch server.js",
     "test": "node --test test/",
-    "verify": "node scripts/live-smoke.mjs"
+    "verify": "node scripts/live-smoke.mjs",
+    "railway:plan": "railway config plan",
+    "railway:apply": "railway config apply",
+    "railway:pull": "railway config pull"
   },
   "dependencies": {
     "undici": "^6.21.0",
     "ws": "^8.18.0"
   },
-  "license": "MIT"
+  "license": "MIT",
+  "devDependencies": {
+    "railway": "^3.16.0"
+  }
 }

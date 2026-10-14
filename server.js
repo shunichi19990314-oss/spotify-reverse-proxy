@@ -513,6 +513,27 @@ httpServer.listen(config.port, config.host, () => {
   if (!isProxyableHost(config.defaultUpstreamHost.split(":")[0])) {
     log.error(`DEFAULT_UPSTREAM_HOST (${config.defaultUpstreamHost}) が許可ドメインに含まれていません！`);
   }
+  // PaaS が公開ドメインを環境変数で教えてくれるので、アクセス先をログに出す
+  const publicUrl = (() => {
+    // Railway: RAILWAY_PUBLIC_DOMAIN (スキーム無し) / Render: RENDER_EXTERNAL_URL (完全 URL)
+    if (process.env.RAILWAY_PUBLIC_DOMAIN) return `https://${process.env.RAILWAY_PUBLIC_DOMAIN}`;
+    if (process.env.RENDER_EXTERNAL_URL) return process.env.RENDER_EXTERNAL_URL.replace(/\/$/, "");
+    if (process.env.FLY_APP_NAME) return `https://${process.env.FLY_APP_NAME}.fly.dev`;
+    return "";
+  })();
+  if (publicUrl) {
+    log.info(`public URL       : ${publicUrl}`);
+    log.info(`  -> ${publicUrl}/            (Spotify Web Player)`);
+    log.info(`  -> ${publicUrl}/__spx/demo  (iframe 表示デモ)`);
+    log.info(`  -> ${publicUrl}/__spx/info  (設定)`);
+    if (process.env.RAILWAY_ENVIRONMENT) {
+      log.info(`railway env      : ${process.env.RAILWAY_ENVIRONMENT}`);
+    }
+  }
+  if (!config.accessToken && publicUrl) {
+    log.error("ACCESS_TOKEN が未設定です。公開 URL は誰でも使える Spotify へのオープンプロキシになります。必ず設定してください。");
+  }
+
   // 親プロセス（テスト / オーケストレータ）向けの準備完了シグナル
   process.stdout.write(`SPX_READY ${actualPort}\n`);
   if (process.send) process.send({ event: "ready", port: actualPort });
