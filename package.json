@@ -1,0 +1,22 @@
+{
+  "name": "spotify-reverse-proxy",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Render-deployable reverse proxy that serves the Spotify Web Player (open.spotify.com) from your own origin, with HTML/CSS/JS URL rewriting.",
+  "main": "server.js",
+  "engines": {
+    "node": ">=20.11.0"
+  },
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js",
+    "test": "node --test test/",
+    "verify": "node scripts/live-smoke.mjs"
+  },
+  "dependencies": {
+    "undici": "^6.21.0",
+    "ws": "^8.18.0"
+  },
+  "license": "MIT"
+}

@@ -1,0 +1,71 @@
+# Render Blueprint
+# リポジトリを Render に接続し "New +" -> "Blueprint" からこのファイルを指定すると、
+# 以下の設定で Web Service が自動作成される。
+#
+# 手動で作る場合: New + -> Web Service -> リポジトリ選択
+#   Runtime          : Node
+#   Build Command    : npm install
+#   Start Command    : node server.js
+#   Health Check Path: /healthz
+
+services:
+  - type: web
+    name: spotify-reverse-proxy
+    runtime: node
+    plan: free
+    region: singapore        # 日本から近い。oregon / frankfurt / ohio / virginia も可
+    branch: main
+    rootDir: .
+    buildCommand: npm install
+    startCommand: node server.js
+    healthCheckPath: /healthz
+    # 無料プランは 15 分無通信でスリープする。有料なら以下を解除すると常時稼働。
+    # autoDeploy: true
+    numInstances: 1
+
+    envVars:
+      # Node のバージョンを固定（package.json の engines と合わせる）
+      - key: NODE_VERSION
+        value: 20.18.1
+      - key: NODE_ENV
+        value: production
+      - key: LOG_LEVEL
+        value: info
+
+      # ---- プロキシ設定 ----
+      - key: DEFAULT_UPSTREAM_HOST
+        value: open.spotify.com
+      - key: HOST_PREFIX
+        value: /__h/
+      - key: WS_PREFIX
+        value: /__w/
+      - key: UPSTREAM_TIMEOUT_MS
+        value: "30000"
+      - key: MAX_REWRITE_BYTES
+        value: "67108864"      # 64MB
+
+      # ---- キャッシュ（無料プラン 512MB RAM に合わせた控えめな値）----
+      - key: CACHE_MAX_BYTES
+        value: "67108864"      # 64MB
+      - key: CACHE_MAX_ENTRIES
+        value: "300"
+      - key: CACHE_MAX_TTL_SEC
+        value: "3600"
+
+      # ---- セキュリティ / 埋め込み ----
+      # 公開 URL は Spotify への踏み台になるため、トークンを必ず設定することを推奨。
+      # "Generate" を選ぶと Render がランダム値を生成する。
+      - key: ACCESS_TOKEN
+        generateValue: true
+      - key: ALLOW_EMBED
+        value: "true"
+      - key: FRAME_ANCESTORS
+        value: "*"
+      # 別オリジンのフロントエンドから fetch したい場合のみ設定（例: https://example.com）
+      - key: CORS_ORIGINS
+        value: ""
+      # 上流に送る User-Agent を固定したい場合のみ設定（空なら利用者の UA を転送）
+      - key: USER_AGENT
+        value: ""
+      - key: ACCEPT_LANGUAGE
+        value: ja,en-US;q=0.9,en;q=0.8
