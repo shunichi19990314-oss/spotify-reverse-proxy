@@ -98,6 +98,19 @@ function makeMock() {
       return res.end(gz);
     }
 
+    // API レスポンス相当: 本文の JSON に Spotify の絶対 URL が入っている
+    if (p === "/apijson") {
+      res.writeHead(200, { "content-type": "application/json" });
+      // JSON.stringify だと \/ エスケープ形が消えてしまうので、生テキストで返す
+      // （実 API にはスラッシュをエスケープして返すものがある）
+      const rawJson =
+        '{"href":"https://api.spotify.com/v1/tracks/123",' +
+        '"images":[{"url":"https://i.scdn.co/image/abc","w":640}],' +
+        '"escaped":"https:\\/\\/spclient.wg.spotify.com\\/x",' +
+        '"external":"https://example.com/keep"}';
+      return res.end(rawJson);
+    }
+
     if (p === "/binary") {
       const buf = Buffer.from(Array.from({ length: 4096 }, (_, i) => i % 251));
       res.writeHead(200, { "content-type": "application/octet-stream", "content-length": String(buf.length) });
@@ -250,6 +263,11 @@ after(async () => {
   mock?.server?.close();
 });
 
+/** 書き換え後の URL は必ず自オリジンを含む絶対 URL になる（new URL() 対策） */
+const abs = (path) => proxy.origin + path;
+/** WebSocket は wss:// を維持する（https:// だと new WebSocket() が壊れる） */
+const wsAbs = (path) => abs(path).replace(/^http:/, "ws:").replace(/^https:/, "wss:");
+
 test("GET / は上流の HTML を返し、CSP/XFO/HSTS が除去される", async () => {
   const res = await fetch(`${proxy.origin}/`, { headers: { "accept-encoding": "identity" } });
   assert.equal(res.status, 200);
@@ -264,11 +282,17 @@ test("GET / は上流の HTML を返し、CSP/XFO/HSTS が除去される", asyn
 test("HTML 内の絶対 URL が /__h/<host>/ に書き換わる", async () => {
   const res = await fetch(`${proxy.origin}/`, { headers: { "accept-encoding": "identity" } });
   const body = await res.text();
-  assert.ok(body.includes('/__h/open.spotifycdn.com/cdn/images/favicon32.png'), body);
-  assert.ok(body.includes('/__h/encore.scdn.co/encore.css'));
-  assert.ok(body.includes('/__h/open.spotifycdn.com/cdn/js/main.js'));
-  assert.ok(body.includes('href="/__h/open.spotify.com/track/123"') || body.includes('href="/track/123"'));
+  assert.ok(body.includes(abs('/__h/open.spotifycdn.com/cdn/images/favicon32.png')), body);
+  assert.ok(body.includes(abs('/__h/encore.scdn.co/encore.css')));
+  assert.ok(body.includes(abs('/__h/open.spotifycdn.com/cdn/js/main.js')));
+  // デフォルト上流と同一ホストは素のパス（ただし絶対 URL）
+  assert.ok(body.includes(`href="${abs('/track/123')}"`) || body.includes(`href="${abs('/__h/open.spotify.com/track/123')}"`), body);
   assert.ok(!/"https:\/\/open\.spotifycdn\.com/.test(body), "書き換え漏れ");
+  // ★ 回帰テスト: new URL(x) が壊れないよう、必ず絶対 URL であること
+  //    （注入スクリプト自体は HP = "/__h/" という文字列を持つので除去してから検査）
+  const withoutPatch = body.replace(/<script data-spx="runtime">[\s\S]*?<\/script>/, "");
+  assert.ok(!withoutPatch.includes('"/__h/'), "ルート相対の /__h/ が残っているとアプリの new URL() が壊れる");
+  assert.ok(!withoutPatch.includes("'/__h/"), "同上（シングルクォート）");
 });
 
 test("integrity / crossorigin が除去される", async () => {
@@ -276,15 +300,15 @@ test("integrity / crossorigin が除去される", async () => {
   const body = await res.text();
   assert.ok(!body.includes("integrity="), "integrity が残っている");
   assert.ok(!/crossorigin/i.test(body), "crossorigin が残っている");
-  assert.ok(body.includes('href="/__h/encore.scdn.co/encore.css"'));
+  assert.ok(body.includes(abs('/__h/encore.scdn.co/encore.css')));
 });
 
 test("srcset が書き換わる", async () => {
   const res = await fetch(`${proxy.origin}/`, { headers: { "accept-encoding": "identity" } });
   const body = await res.text();
-  assert.ok(body.includes("/__h/i.scdn.co/a.jpg 1x"), body);
-  assert.ok(body.includes("/__h/i.scdn.co/b.jpg 2x"), body);
-  assert.ok(body.includes('src="/__h/mosaic.scdn.co/m.jpg"'), body);
+  assert.ok(body.includes(abs("/__h/i.scdn.co/a.jpg") + " 1x"), body);
+  assert.ok(body.includes(abs("/__h/i.scdn.co/b.jpg") + " 2x"), body);
+  assert.ok(body.includes(`src="${abs('/__h/mosaic.scdn.co/m.jpg')}"`), body);
 });
 
 test("ランタイムパッチが <head> 先頭に注入される", async () => {
@@ -315,10 +339,12 @@ test("JS バンドル内の各種エスケープ形が書き換わる", async ()
   const res = await fetch(`${proxy.origin}/bundle.js`, { headers: { "accept-encoding": "identity" } });
   assert.equal(res.headers.get("content-type"), "application/javascript; charset=utf-8");
   const body = await res.text();
-  assert.ok(body.includes('"/__h/spclient.wg.spotify.com/bootstrap/v1"'), body);
-  assert.ok(body.includes(String.raw`"\/__h\/i.scdn.co\/image\/abc"`), body);
-  assert.ok(body.includes('"/__w/gae2-dealer.g2.spotify.com/?token=1"'), body);
-  assert.ok(body.includes('"/__h/open.spotifycdn.com/cdn/x.png"'), body);
+  assert.ok(body.includes(`"${abs('/__h/spclient.wg.spotify.com/bootstrap/v1')}"`), body);
+  // スラッシュエスケープ形: プレフィックス全体が \/ になる
+  const escForm = abs("/__h/i.scdn.co/image/abc").replace(/\//g, "\\/");
+  assert.ok(body.includes(`"${escForm}"`), body);
+  assert.ok(body.includes(`"${wsAbs('/__w/gae2-dealer.g2.spotify.com/?token=1')}"`), body);
+  assert.ok(body.includes(`"${abs('/__h/open.spotifycdn.com/cdn/x.png')}"`), body);
   // 対象外はそのまま
   assert.ok(body.includes("https://www.google.com/recaptcha/api.js"), body);
   assert.ok(body.includes("https://open.spotify.com.evil.com/x"), body);
@@ -343,17 +369,17 @@ test("gzip 非対応クライアントには無圧縮で返す", async () => {
 test("Location ヘッダを書き換える（他ホスト / 同一ホスト）", async () => {
   const r1 = await fetch(`${proxy.origin}/redirect`, { redirect: "manual" });
   assert.equal(r1.status, 302);
-  assert.equal(r1.headers.get("location"), "/__h/accounts.spotify.com/login?continue=https%3A%2F%2Fopen.spotify.com%2F");
+  assert.equal(r1.headers.get("location"), abs("/__h/accounts.spotify.com/login?continue=https%3A%2F%2Fopen.spotify.com%2F"));
 
   // 既定上流と同一ホスト -> 素のルート相対パス
   const r2 = await fetch(`${proxy.origin}/redirect-same-host`, { redirect: "manual" });
   assert.equal(r2.status, 301);
-  assert.equal(r2.headers.get("location"), "/collection/tracks");
+  assert.equal(r2.headers.get("location"), abs("/collection/tracks"));
 
   // 別の許可ホスト -> /__h/ 形式
   const r3 = await fetch(`${proxy.origin}/redirect-other-host`, { redirect: "manual" });
   assert.equal(r3.status, 302);
-  assert.equal(r3.headers.get("location"), "/__h/open.spotify.com/collection/tracks");
+  assert.equal(r3.headers.get("location"), abs("/__h/open.spotify.com/collection/tracks"));
 });
 
 test("バイナリは素通し（書き換えない・壊さない）", async () => {
@@ -391,7 +417,7 @@ test("/__h/<host>/<path> で別ホストを明示的に叩ける", async () => {
   });
   assert.equal(res.status, 200);
   const body = await res.text();
-  assert.ok(body.includes("/__h/spclient.wg.spotify.com/bootstrap/v1"));
+  assert.ok(body.includes(abs("/__h/spclient.wg.spotify.com/bootstrap/v1")));
 });
 
 test("Origin / Referer / sec-fetch-site が上流オリジンに付け替わっている", async () => {
@@ -408,13 +434,28 @@ test("Origin / Referer / sec-fetch-site が上流オリジンに付け替わっ�
   assert.equal(data.headers.connection, "keep-alive");
 });
 
-test("application/json のエコーは URL が書き換わる（API レスポンス内の画像 URL 対策）", async () => {
+test("API レスポンス JSON 内の Spotify URL が絶対 URL に書き換わる", async () => {
+  const res = await fetch(`${proxy.origin}/apijson`, { headers: { "accept-encoding": "identity" } });
+  const text = await res.text();
+  assert.ok(text.includes(abs("/__h/api.spotify.com/v1/tracks/123")), text);
+  assert.ok(text.includes(abs("/__h/i.scdn.co/image/abc")), text);
+  // スラッシュエスケープ形（\/）も同じく絶対 URL になる
+  const escAbs = abs("/__h/spclient.wg.spotify.com/x").replace(/\//g, "\\/");
+  assert.ok(text.includes(escAbs), `${escAbs} が見つからない: ${text}`);
+  // 対象外ドメインはそのまま
+  assert.ok(text.includes("https://example.com/keep"), text);
+  // JSON として壊れていないこと
+  const parsed = JSON.parse(text);
+  assert.equal(new URL(parsed.images[0].url).origin, proxy.origin, "new URL() で壊れない絶対 URL であること");
+});
+
+test("冪等性: 自オリジン付きの URL は二度書き換えない", async () => {
+  // この E2E では PROXY_ALLOW_DOMAINS に 127.0.0.1 を含めている（＝自ホスト）。
+  // それでも /__h/127.0.0.1:PORT/__h/... のような二重ネストが起きてはいけない。
   const res = await fetch(`${proxy.origin}/echo`, { headers: { "accept-encoding": "identity" } });
   const text = await res.text();
-  // 上流に届いた origin / referer (http://127.0.0.1:PORT/echo) が
-  // JSON 本文内でも /__h/... に書き換わっている（＝API レスポンス内の URL も拾える）
-  assert.ok(text.includes(`"origin":"/__h/${MOCK_HOST}:${mockPort}"`), text.slice(0, 400));
-  assert.ok(text.includes(`"referer":"/__h/${MOCK_HOST}:${mockPort}/echo"`), text.slice(0, 400));
+  assert.ok(!text.includes("__h/127.0.0.1"), `二重ネストしている: ${text.slice(0, 300)}`);
+  assert.ok(!text.includes(`${proxy.origin}${proxy.origin}`), text.slice(0, 300));
 });
 
 test("Cookie が上流に転送される", async () => {
@@ -446,6 +487,16 @@ test("許可外ホストは 403", async () => {
 test("サブドメイン偽装ホストは 403", async () => {
   const res = await fetch(`${proxy.origin}/__h/127.0.0.1.evil.com/x`);
   assert.equal(res.status, 403);
+});
+
+test("no-op Service Worker を配信する（workbox の unhandled rejection 防止）", async () => {
+  const res = await fetch(`${proxy.origin}/__spx/sw.js`);
+  assert.equal(res.status, 200);
+  assert.equal(res.headers.get("service-worker-allowed"), "/", "scope=/ にはこのヘッダが必要");
+  assert.match(res.headers.get("content-type"), /javascript/);
+  const body = await res.text();
+  assert.ok(body.includes("skipWaiting"), body);
+  assert.ok(body.includes("fetch"), "fetch ハンドラ（passthrough）があること");
 });
 
 test("/healthz は常に認証不要、/__spx/* は設定を漏らさない", async () => {

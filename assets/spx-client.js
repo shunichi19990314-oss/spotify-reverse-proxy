@@ -22,7 +22,16 @@
   var DOMAINS = __SPX_DOMAINS__;
   var HP = "__SPX_HOST_PREFIX__";
   var WP = "__SPX_WS_PREFIX__";
+  var SW_URL = "__SPX_SW_URL__";
   var VERSION = "__SPX_VERSION__";
+
+  /*
+   * 書き換え結果は必ず **自オリジンを含む絶対 URL** にする。
+   * ルート相対 ("/__h/...") だと、アプリ側が base 無しで new URL(x) した瞬間に
+   *   TypeError: Failed to construct 'URL': Invalid URL
+   * が飛んでモジュール評価が失敗する（Spotify のバンドルに実在するパターン）。
+   */
+  var ORIGIN = location.origin;
 
   /* ---------------- URL 書き換え ---------------- */
 
@@ -61,19 +70,24 @@
     if (!hostAllowed(host)) return url;
 
     var isWs = scheme === "ws" || scheme === "wss";
+    // WebSocket は wss:// を維持する（https:// だと new WebSocket() が SyntaxError になる）
+    var origin = isWs ? ORIGIN.replace(/^https:/, "wss:").replace(/^http:/, "ws:") : ORIGIN;
     var prefix = isWs ? WP : HP;
     if (rest.length && rest.charAt(0) !== "/") rest = "/" + rest;
-    return prefix + authority + rest;
+    return origin + prefix + authority + rest;
   }
 
   /** WebSocket 用の絶対 wss:// URL を作る */
   function rewriteWs(url) {
     var u = typeof url === "string" ? url : url instanceof URL ? String(url) : url;
     var r = rewrite(u);
-    if (typeof r === "string" && r.charAt(0) === "/") {
+    if (typeof r !== "string") return r;
+    // 相対パスのまま（＝プロキシ対象外の URL）なら wss 絶対 URL にする
+    if (r.indexOf("//") === -1) {
       return (location.protocol === "https:" ? "wss://" : "ws://") + location.host + r;
     }
-    return r;
+    // http(s) 形式で返ってきた場合は wss に変換（静的書き換え済みの文字列など）
+    return r.replace(/^https:/, "wss:").replace(/^http:/, "ws:");
   }
 
   function rewriteSrcset(value) {
@@ -196,20 +210,31 @@
     };
   } catch (e) {}
 
-  /* ---------------- Service Worker 無効化 ---------------- */
+  /* ---------------- Service Worker を no-op に差し替え ---------------- */
   /*
-   * Service Worker はスコープがこのオリジン配下に限定されるため、
-   * 上流 (open.spotify.com) 前提のキャッシュ処理が壊れる。登録を止める。
+   * 上流 (open.spotify.com) の Service Worker は、スコープがこのオリジン配下に
+   * なるためキャッシュ処理が壊れる。かといって register() を reject すると
+   * workbox-window が unhandled rejection を起こして pageerror になる。
+   * そこで「何もしない SW」(/__spx/sw.js) に差し替え、登録自体は成功させる。
    */
   try {
-    if (navigator.serviceWorker) {
-      var blocked = function () {
-        return Promise.reject(new DOMException("Service workers are disabled by the reverse proxy.", "NotAllowedError"));
+    if (navigator.serviceWorker && navigator.serviceWorker.register) {
+      var origRegister = navigator.serviceWorker.register.bind(navigator.serviceWorker);
+      var patchedRegister = function (scriptURL, options) {
+        try {
+          return origRegister(ORIGIN + SW_URL, Object.assign({}, options || {}, { scope: "/" }));
+        } catch (e) {
+          return Promise.reject(e);
+        }
       };
       try {
-        Object.defineProperty(navigator.serviceWorker, "register", { value: blocked, writable: true, configurable: true });
+        Object.defineProperty(navigator.serviceWorker, "register", {
+          value: patchedRegister,
+          writable: true,
+          configurable: true,
+        });
       } catch (e) {
-        navigator.serviceWorker.register = blocked;
+        navigator.serviceWorker.register = patchedRegister;
       }
     }
   } catch (e) {}
@@ -304,8 +329,10 @@
 
   window.__SPX__ = {
     version: VERSION,
+    origin: ORIGIN,
     hostPrefix: HP,
     wsPrefix: WP,
+    swUrl: SW_URL,
     domains: DOMAINS,
     rewrite: rewrite,
     rewriteWs: rewriteWs,

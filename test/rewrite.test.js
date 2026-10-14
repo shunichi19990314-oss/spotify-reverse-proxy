@@ -7,8 +7,7 @@ import {
   mediaType,
   stripIntegrityAndCors,
   stripMetaCsp,
-  rewriteHtmlAttributes,
-  rewriteSrcset,
+  rewriteInlineBase64Scripts,
 } from "../lib/rewrite.js";
 
 test("https:// の絶対 URL を /__h/<host>/ に書き換える", () => {
@@ -128,20 +127,90 @@ test("stripMetaCsp が meta CSP を除去する", () => {
   assert.ok(out.includes('<meta charset="utf-8">'), out);
 });
 
-test("rewriteSrcset", () => {
+test("base 指定時は自オリジンを含む絶対 URL になる（new URL() 破壊の防止）", () => {
+  const B = "https://spx.up.railway.app";
+  // 実障害の再現: Spotify のバンドルには
+  //   let dI = "<url>", dk = new URL(dI).origin;
+  // というモジュールトップレベルの new URL() があり、
+  // ルート相対に書き換えると TypeError でモジュール評価が失敗する。
+  const out = rewriteText('"https://open.spotifycdn.com/cdn/templates/display.html"', B);
+  assert.equal(out, '"https://spx.up.railway.app/__h/open.spotifycdn.com/cdn/templates/display.html"');
+  const value = JSON.parse(out);
+  assert.equal(new URL(value).origin, B, "new URL() で origin を取り出せること");
+});
+
+test("wss:// は wss:// のまま（https:// にすると new WebSocket() が壊れる）", () => {
+  const B = "https://spx.up.railway.app";
   assert.equal(
-    rewriteSrcset("https://i.scdn.co/a.jpg 1x, https://i.scdn.co/b.jpg 2x"),
-    "/__h/i.scdn.co/a.jpg 1x, /__h/i.scdn.co/b.jpg 2x",
+    rewriteText('new WebSocket("wss://gae2-dealer.g2.spotify.com/?t=1")', B),
+    'new WebSocket("wss://spx.up.railway.app/__w/gae2-dealer.g2.spotify.com/?t=1")',
+  );
+  assert.equal(
+    rewriteText('"ws://dealer.spotify.com/x"', B),
+    '"wss://spx.up.railway.app/__w/dealer.spotify.com/x"',
+    "http ベースのプロキシでは ws -> wss に昇格させる",
+  );
+  assert.equal(
+    rewriteText(String.raw`"wss:\/\/dealer.spotify.com\/x"`, B),
+    String.raw`"wss:\/\/spx.up.railway.app\/__w\/dealer.spotify.com\/x"`,
   );
 });
 
-test("rewriteHtmlAttributes が srcset / data-* 属性も書き換える", () => {
-  const html =
-    '<img src="https://i.scdn.co/a.jpg" srcset="https://i.scdn.co/a.jpg 1x, https://i.scdn.co/b.jpg 2x" data-src="https://pl.scdn.co/c.jpg">';
-  const out = rewriteHtmlAttributes(rewriteText(html));
-  assert.ok(out.includes('src="/__h/i.scdn.co/a.jpg"'), out);
-  assert.ok(out.includes("/__h/i.scdn.co/b.jpg 2x"), out);
-  assert.ok(out.includes('data-src="/__h/pl.scdn.co/c.jpg"'), out);
+test("エスケープ形でも自オリジン込みの絶対 URL になる", () => {
+  const B = "https://spx.up.railway.app";
+  assert.equal(
+    rewriteText(String.raw`"https:\/\/spclient.wg.spotify.com\/bootstrap\/v1"`, B),
+    String.raw`"https:\/\/spx.up.railway.app\/__h\/spclient.wg.spotify.com\/bootstrap\/v1"`,
+  );
+  assert.equal(
+    rewriteText(String.raw`"https:\u002F\u002Fapresolve.spotify.com\u002Fy"`, B),
+    String.raw`"https:\u002F\u002Fspx.up.railway.app\u002F__h\u002Fapresolve.spotify.com\u002Fy"`,
+  );
+});
+
+test("冪等性: 書き換え結果を再度 rewriteText しても変化しない", () => {
+  const B = "https://spx.up.railway.app";
+  const once = rewriteText("https://i.scdn.co/a.png", B);
+  assert.equal(rewriteText(once, B), once);
+  // 自ホストを許可リストに含めた構成でも二重ネストしない
+  const twice = rewriteText(rewriteText("https://i.scdn.co/a.png", B), B);
+  assert.ok(!twice.includes("__h/spx.up.railway.app"), `二重ネスト: ${twice}`);
+});
+
+test("rewriteInlineBase64Scripts: base64 埋め込み JSON 内の URL も書き換える", () => {
+  const B = "https://spx.up.railway.app";
+  const payload = JSON.stringify({
+    "a.js": "https://open.spotifycdn.com/cdn/a.js",
+    "b.png": "https://i.scdn.co/b.png",
+    ext: "https://example.com/keep",
+  });
+  const b64 = Buffer.from(payload, "utf8").toString("base64");
+  const html = `<script id="__CDN_FILE_URLS__" type="text/plain">${b64}</script>`;
+
+  const out = rewriteInlineBase64Scripts(html, B);
+  assert.ok(out.includes("text/plain"), out);
+
+  const newB64 = /type="text\/plain">([^<]*)<\/script>/.exec(out)[1];
+  const decoded = JSON.parse(Buffer.from(newB64, "base64").toString("utf8"));
+  assert.equal(decoded["a.js"], `${B}/__h/open.spotifycdn.com/cdn/a.js`);
+  assert.equal(decoded["b.png"], `${B}/__h/i.scdn.co/b.png`);
+  assert.equal(decoded.ext, "https://example.com/keep", "対象外ドメインは維持");
+  // new URL() で壊れない
+  assert.equal(new URL(decoded["a.js"]).origin, B);
+});
+
+test("rewriteInlineBase64Scripts: base64 でない / バイナリっぽい中身は触らない", () => {
+  const B = "https://spx.up.railway.app";
+  const notB64 = '<script type="text/plain">hello world!!</script>';
+  assert.equal(rewriteInlineBase64Scripts(notB64, B), notB64);
+
+  const empty = '<script type="text/plain"></script>';
+  assert.equal(rewriteInlineBase64Scripts(empty, B), empty);
+
+  // 書き換え対象 URL を含まなければ再エンコードもしない（バイト完全一致）
+  const stable = Buffer.from(JSON.stringify({ a: 1 }), "utf8").toString("base64");
+  const html = `<script type="text/plain">${stable}</script>`;
+  assert.equal(rewriteInlineBase64Scripts(html, B), html);
 });
 
 test("大きな JS バンドルでも破綻しない（性能スモーク）", () => {

@@ -22,7 +22,7 @@ HTML / CSS / JS / JSON の本文中にある Spotify 系絶対 URL をプロキ�
 
 | | 状態 | 補足 |
 |---|---|---|
-| ページの表示・レイアウト・CSS・フォント | ✅ 動作 | 実測で全アセット 200 OK |
+| ページの表示・レイアウト・CSS・フォント | ✅ 動作 | 実測で全アセット 200 OK。ヘッドレスブラウザでフル UI の描画を確認済み（[docs/screenshot.png](docs/screenshot.png)） |
 | 画像・アートワーク・アイコン | ✅ 動作 | `/__h/i.scdn.co/...` 等へ書き換え |
 | JS バンドル / 動的 import / マニフェスト | ✅ 動作 | 4.3MB のバンドルも書き換え漏れゼロ |
 | 検索・閲覧などの API 呼び出し | 🟡 概ね動作 | `Origin` / `Referer` を上流オリジンに付け替えてある |
@@ -69,6 +69,34 @@ HTML / CSS / JS / JSON の本文中にある Spotify 系絶対 URL をプロキ�
 
 デフォルトルートを `open.spotify.com` に落としてあるのがポイントで、これにより上流 HTML 内の**ルート相対 URL（`/static/...`）を一切書き換えずに**動かせます。書き換えるのは絶対 URL だけなので、巨大な JS バンドルでも置換箇所が最小限で済みます。
 
+### 書き換えは必ず「自オリジン込みの絶対 URL」
+
+`/__h/...` のようなルート相対には**しません**。理由は、Spotify のバンドルに
+
+```js
+let dI = "https://open.spotifycdn.com/cdn/templates/display.html";
+let dk = new URL(dI).origin;   // ← モジュールのトップレベルで評価される
+```
+
+というコードが実在し、ルート相対に書き換えると `new URL()` が base 無しで
+`TypeError: Invalid URL` を投げ、モジュール評価ごと失敗して
+「エラーが発生したようです」のエラーバウンダリが出るためです。
+
+よって出力は `https://<あなたのドメイン>/__h/<host>/<path>` になります。
+これにより `new URL()`・`URL#origin`・`<base>` 未設定の環境でも壊れません。
+
+あわせて以下も行っています:
+
+- **base64 埋め込み JSON の展開**: `<script id="__CDN_FILE_URLS__" type="text/plain">` に
+  base64 で入った 982 件の CDN URL マップをデコードして書き換え、再エンコードする
+- **単一パス化**: 置換結果を `\u0000` マーカーで保護し、複数ルールが互いの出力を
+  書き換える二重ネストを構造的に防ぐ
+- **冪等性**: 自オリジンのホストは書き換えない（`PROXY_ALLOW_DOMAINS` に自ホストを
+  含めた構成でも `/__h/<self>/__h/...` にならない）
+- **WebSocket は `wss://` を維持**: `https://` にすると `new WebSocket()` が SyntaxError になる
+- **Service Worker は no-op に差し替え**: 登録を reject すると workbox-window が
+  unhandled rejection を起こすため、`/__spx/sw.js`（何もしない SW）を配信して登録を成功させる
+
 ### 書き換えルール
 
 上流の HTML/CSS/JS/JSON には Spotify の URL が 3 通りの形で現れるため、それぞれに対応しています。
@@ -89,6 +117,7 @@ HTML / CSS / JS / JSON の本文中にある Spotify 系絶対 URL をプロキ�
 同時に以下も行います。
 
 - `Content-Security-Policy` / `X-Frame-Options` / `HSTS` / `CORP` / `COOP` / `Permissions-Policy` ヘッダの除去
+- `wss://` / `ws://` は `/__w/` へ、かつスキームは `wss://` のまま維持
 - `<meta http-equiv="Content-Security-Policy">` の除去
 - `integrity` / `crossorigin` 属性の除去（本文を書き換えると SRI ハッシュが必ず不一致になるため）
 - `srcset` 属性のカンマ区切り各 URL の書き換え
@@ -542,7 +571,7 @@ npm run verify   # 実 Spotify を相手としたライブ検証（要ネット�
 ```
 
 - **Railway IaC**: `.railway/railway.ts` を実際に `railway/iac` SDK で評価し、service / healthcheck / startCommand / `preserve()` を検証。あわせて「非推奨の `railway.json` を置いていないこと」「Dockerfile と `.node-version` と `render.yaml` が EOL の Node 20 を指していないこと」も検査する
-- **ユニット**: 書き換え（生 / エスケープ / Unicode / CSS / srcset / 入れ子スキーム / サブドメイン偽装）、ホスト許可判定、ヘッダ衛生、Set-Cookie 書き換え
+- **ユニット**: 書き換え（生 / エスケープ / Unicode / CSS / srcset / 入れ子スキーム / サブドメイン偽装 / base64 埋め込み / 冪等性 / wss 維持 / 絶対 URL）、ホスト許可判定、ヘッダ衛生、Set-Cookie 書き換え
 - **E2E**: モック上流サーバを立て、実サーバを子プロセスで起動。HTML 書き換え・CSP 除去・ランタイムパッチ注入位置・JS バンドルのエスケープ形・Location・Set-Cookie・バイナリ素通し・上限超過ストリーム・gzip・POST ボディ・**WebSocket 双方向中継**・403 拒否・キャッシュ HIT/MISS・`ACCESS_TOKEN` 認証を通す
 - **性能スモーク**: 2.4MB のテキスト書き換えが 15 秒以内
 

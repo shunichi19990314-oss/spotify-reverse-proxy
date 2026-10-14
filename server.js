@@ -10,7 +10,7 @@ import {
   shouldRewrite,
   mediaType,
   rewriteText,
-  rewriteHtmlAttributes,
+  rewriteInlineBase64Scripts,
   stripIntegrityAndCors,
   stripMetaCsp,
 } from "./lib/rewrite.js";
@@ -122,7 +122,41 @@ function endWithBuffer(res, status, pairs, raw, gz, useGzip) {
   res.end(raw);
 }
 
-/** リクエストが HTTPS かどうか（Render は x-forwarded-proto を付ける） */
+/**
+ * 書き換え後の URL に埋め込む「自オリジン」を決定する。
+ *
+ * 絶対 URL で書き換える必要がある理由:
+ * Spotify のバンドルには
+ *   let dI = "<URL>", dk = new URL(dI).origin;
+ * のような**モジュールトップレベルの new URL()** があり、
+ * ルート相対 ("/__h/...") に書き換えると `TypeError: Invalid URL` で
+ * webpack モジュールの評価自体が失敗し、アプリが
+ * 「エラーが発生したようです」を出す。
+ */
+function getPublicBase(req) {
+  if (config.publicBaseUrl) return config.publicBaseUrl.replace(/\/+$/, "");
+  const fwdHost = String(req.headers["x-forwarded-host"] || "").split(",")[0].trim();
+  const host = fwdHost || String(req.headers.host || "").trim();
+  if (!host) return "";
+  return `${isSecureRequest(req) ? "https" : "http"}://${host}`;
+}
+
+/**
+ * no-op Service Worker。
+ * 上流の SW はスコープがこのオリジン配下に来ると壊れるので登録させたくないが、
+ * register() を reject すると workbox-window が unhandled rejection を起こす。
+ *  そこで「何もしない SW」を自前で配信して、登録自体は成功させる。
+ */
+const NOOP_SERVICE_WORKER = `/* no-op service worker served by spotify-reverse-proxy */
+self.addEventListener("install", function () { self.skipWaiting(); });
+self.addEventListener("activate", function (e) { e.waitUntil(self.clients.claim()); });
+self.addEventListener("fetch", function () { /* passthrough */ });
+self.addEventListener("message", function (e) {
+  if (e.data && e.data.type === "SKIP_WAITING") self.skipWaiting();
+});
+`;
+
+/** リクエストが HTTPS かどうか（Render / Railway は x-forwarded-proto を付ける） */
 function isSecureRequest(req) {
   const xf = String(req.headers["x-forwarded-proto"] || "").split(",")[0].trim().toLowerCase();
   if (xf) return xf === "https";
@@ -163,9 +197,11 @@ function isAuthorized(req, url) {
 async function proxy(req, res, target) {
   const authority = buildAuthority(target.host, target.port);
   const upstreamUrl = buildUpstreamUrl(target.host, target.port, target.path, target.search);
+  // 書き換え後の URL に埋め込む自オリジン（ホストごとに本文が変わるのでキャッシュキーにも含める）
+  const base = getPublicBase(req);
 
   /* ---- キャッシュヒット（GET のみ）: 上流に問い合わせず即返す ---- */
-  const cacheKey = req.method === "GET" ? upstreamUrl : null;
+  const cacheKey = req.method === "GET" ? `${base}|${upstreamUrl}` : null;
   if (cacheKey) {
     const hit = cache.get(cacheKey);
     if (hit) {
@@ -218,11 +254,11 @@ async function proxy(req, res, target) {
   clearTimeout(timer);
 
   /* ---- レスポンスヘッダの組み立て ---- */
-  const headerPairs = sanitizeResponseHeaders(upstream);
+  const headerPairs = sanitizeResponseHeaders(upstream, base);
 
   const location = upstream.headers.get("location");
   if (location) {
-    const rewritten = rewriteLocationHeader(location);
+    const rewritten = rewriteLocationHeader(location, base);
     if (rewritten) headerPairs.push(["location", rewritten]);
   }
 
@@ -317,10 +353,12 @@ async function proxy(req, res, target) {
   if (isHtml) {
     body = stripMetaCsp(body);
     body = stripIntegrityAndCors(body);
+    // base64 で埋め込まれた JSON（#appServerConfig / #__CDN_FILE_URLS__ など）を
+    // デコードして書き換え、再エンコードする
+    body = rewriteInlineBase64Scripts(body, base);
   }
-  body = rewriteText(body);
+  body = rewriteText(body, base);
   if (isHtml) {
-    body = rewriteHtmlAttributes(body);
     body = injectClientScript(body, CLIENT_SCRIPT);
   }
 
@@ -387,6 +425,7 @@ function serverInfo() {
       "/__spx/info": "この JSON",
       "/__spx/stats": "キャッシュ統計 / メモリ使用量",
       "/__spx/demo": "iframe 表示デモページ",
+      "/__spx/sw.js": "no-op Service Worker（workbox の登録を成功させるため）",
       "/__spx/client.js": "注入されるランタイムパッチ",
       "/healthz": "Render ヘルスチェック",
     },
@@ -433,6 +472,14 @@ const httpServer = http.createServer(async (req, res) => {
   }
   if (pathname === `${config.controlPrefix}client.js`) {
     return send(res, 200, CLIENT_SCRIPT, { "content-type": "application/javascript; charset=utf-8" });
+  }
+  if (pathname === `${config.controlPrefix}sw.js`) {
+    // Service-Worker-Allowed: / が無いと scope=/ での登録を拒否される
+    return send(res, 200, NOOP_SERVICE_WORKER, {
+      "content-type": "application/javascript; charset=utf-8",
+      "cache-control": "no-cache",
+      "service-worker-allowed": "/",
+    });
   }
   if (pathname === `${config.controlPrefix}demo`) {
     return send(res, 200, DEMO_PAGE, { "content-type": "text/html; charset=utf-8" });
